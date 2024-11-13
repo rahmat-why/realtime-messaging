@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction Message</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        /* Additional styles to refine the look of the chat */
+        #chatPanel {
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        #messageContainer {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+        }
+
+        .message {
+            margin-bottom: 10px;
+            padding: 10px;
+            max-width: 70%;
+            border-radius: 5px;
+        }
+
+        .incoming {
+            text-align: left;  /* Align incoming messages to the left */
+            margin-left: 0;
+            margin-right: auto;
+        }
+
+        .outgoing {
+            text-align: right; /* Align outgoing messages to the right */
+            color: black; /* White text for outgoing messages */
+            margin-left: auto;
+            margin-right: 0;
+        }
+
+        .message.incoming {
+            background-color: #e9ecef;
+        }
+
+        .message.outgoing {
+            background-color: #d1e7dd;
+        }
+
+        #userTable td, #userTable th {
+            vertical-align: middle;
+        }
+
+        textarea#messageText {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+        }
+
+        #sendMessageButton {
+            width: 100%;
+        }
+
+        .btn-primary {
+            background-color: #007bff;
+        }
+
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+
+        /* Add some padding between the users and messages */
+        #userContainer {
+            margin-bottom: 20px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        strong {
+            font-weight: bold;
+        }
+        em {
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Navigation Bar -->
+<nav class="navbar navbar-expand-lg navbar-light bg-light">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="#">Realtime Messaging</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item menu-user">
+                    <a class="nav-link" href="/view/user">User</a>
+                </li>
+                <li class="nav-item menu-message">
+                    <a class="nav-link active" href="/view/message">Message</a>
+                </li>
+                <li class="nav-item">
+                    <a href="javascript:void(0)" class="nav-link text-danger" onclick="logout()">Logout</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div id="chatPanel" class="container">
+    <div class="d-flex justify-content-between align-items-center">
+        <h4>Hello, <b class="menu-me"></b></h4>
+    </div>
+
+    <div id="messageContainer" class="messages">
+        <!-- Messages will be dynamically inserted here -->
+    </div>
+
+    <!-- User List Section -->
+    <div id="userContainer" class="mb-4">
+        <table id="userTable" class="table table-bordered table-striped">
+            <thead class="table-light">
+                <tr>
+                    <!-- Select All checkbox -->
+                    <th><input type="checkbox" id="selectAllCheckbox" class="form-check-input" /></th>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Users will be dynamically inserted here -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Message Input and Send Button -->
+    <textarea id="messageText" class="form-control" placeholder="Type your message here..."></textarea>
+    <button id="sendMessageButton" class="btn btn-primary">Send</button>
+</div>
+
+<!-- Bootstrap 5 JS (required for some components) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+    const socket = io();
+    socket.on("connect", () => console.log("socket connected on client"));
+    function getCookie(name) {
+        const cookies = document.cookie.split('; ');
+        for (let i = 0; i < cookies.length; i++) {
+            const [key, value] = cookies[i].split('=');
+            if (key === name) {
+                return decodeURIComponent(value);
+            }
+        }
+        return null;  // Return null if the cookie is not found
+    }
+
+    async function loadMe() {
+        try {
+            const response = await fetch('/auth/me', {
+                headers: { 'Authorization': `Bearer ${getCookie('token')}` }
+            });
+            const user = await response.json();
+            
+            // Set the username to the menu-me element
+            document.querySelector('.menu-me').innerHTML = user.username;
+            
+            // Super Admin
+            if(user.role_id != 6) {
+                document.querySelectorAll('.menu-user').forEach(element => {
+                    element.classList.add('hidden');
+                });
+            }
+        } catch (error) {
+            console.error('Failed to load users:', error);
+        }
+    }
+    
+    async function refreshMessages() {
+        fetchMessages();
+        loadUsers();
+    }
+
+    // Your JavaScript logic from earlier goes here
+    async function fetchMessages() {
+        try {
+            const response = await fetch('/auth/receive-message', {
+                headers: { 'Authorization': `Bearer ${getCookie('token')}` }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Error: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            displayMessages(data.messages);
+        } catch (error) {
+            console.error('Error fetching messages:', error);
+        }
+    }
+
+    function displayMessages(messages) {
+        const messageContainer = document.getElementById('messageContainer');
+        messageContainer.innerHTML = '';  // Clear previous messages
+
+        messages.forEach(message => {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', message.type === 'in' ? 'incoming' : 'outgoing');
+
+            const messageType = message.type === 'in' ? 'Incoming' : 'Outgoing';
+            
+            // Subtract 7 hours and format the timestamp
+            const timestamp = new Date(message.timestamp);
+            timestamp.setHours(timestamp.getHours() - 7);  // Subtract 7 hours
+
+            // Format to HH:mm - DD MMM YYYY
+            const formattedTimestamp = `${timestamp.getHours().toString().padStart(2, '0')}:${timestamp.getMinutes().toString().padStart(2, '0')} - ${timestamp.getDate().toString().padStart(2, '0')} ${timestamp.toLocaleString('en-US', { month: 'short' })} ${timestamp.getFullYear()}`;
+
+            let senderReceiver = '';
+
+            if (message.type === 'out') {
+                var receivers = JSON.parse(message.receiver_id);
+                let receiverNames = [];
+
+                // Fetch usernames for each receiver
+                for (let i = 0; i < receivers.length; i++) {
+                    const receiverId = receivers[i];
+                    const username = receiverId.userName;
+                    receiverNames.push(username);
+                }
+
+                senderReceiver = receiverNames.length > 0 ? `Receiver(s): ${receiverNames.join(', ')}` : 'Receiver(s): N/A';
+            } else if (message.type === 'in') {
+                senderReceiver = `Sender: ${message.sender_name}`;
+            }
+
+            messageDiv.innerHTML = `
+                <strong>${messageType}:</strong> 
+                ${message.content} 
+                <br>
+                <em>${senderReceiver}</em>
+                <br>
+                <em>Sent at: ${formattedTimestamp}</em>
+            `;
+
+            messageContainer.appendChild(messageDiv);
+        });
+    }
+
+    async function loadUsers() {
+        try {
+            const response = await fetch('/auth/chat-users', {
+                headers: { 'Authorization': `Bearer ${getCookie('token')}` }
+            });
+
+            const users = await response.json();
+            const userTable = document.getElementById('userTable').getElementsByTagName('tbody')[0];
+            userTable.innerHTML = '';
+
+            users.forEach(user => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><input type="checkbox" class="userCheckbox form-check-input" data-user-id="${user.user_id}" data-user-name="${user.username}" /></td>
+                    <td>${user.username}</td>
+                    <td>${user.email}</td>
+                    <td>${user.role_name}</td>
+                `;
+                userTable.appendChild(row);
+            });
+        } catch (error) {
+            console.error('Failed to load users:', error);
+        }
+    }
+
+    async function sendMessage() {
+        const messageText = document.getElementById('messageText').value;
+        const checkboxes = document.querySelectorAll('.userCheckbox:checked');
+        const receiverIds = [];
+
+        checkboxes.forEach(checkbox => {
+            const userId = parseInt(checkbox.getAttribute('data-user-id'));
+            const userName = checkbox.getAttribute('data-user-name');
+            receiverIds.push({ userId, userName });
+        });
+
+        if (receiverIds.length === 0) {
+            alert("Please select at least one user.");
+            return;
+        }
+
+        if(!messageText) {
+            alert("Please enter the message.");
+            return;
+        }
+
+        const messageData = {
+            receiver_id: receiverIds,
+            content: messageText
+        };
+
+        try {
+            const response = await fetch('/auth/send-message', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${getCookie('token')}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(messageData)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Error: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            
+            document.getElementById('messageText').value = '';
+
+            socket.emit("socket-send-message", messageText);
+
+            fetchMessages();
+
+            // Uncheck all user checkboxes
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = false;
+            });
+        } catch (error) {
+            console.error('Error sending message:', error);
+        }
+    }
+
+    socket.on("socket-receive-message", message => {
+        fetchMessages();
+    });
+
+    document.getElementById('sendMessageButton').addEventListener('click', sendMessage);
+
+    document.getElementById('selectAllCheckbox').addEventListener('change', function() {
+        const checkboxes = document.querySelectorAll('.userCheckbox');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = this.checked;
+        });
+    });
+
+    document.querySelector('tbody').addEventListener('change', function(event) {
+        if (event.target && event.target.classList.contains('userCheckbox')) {
+            const checkboxes = document.querySelectorAll('.userCheckbox');
+            const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+            selectAllCheckbox.checked = checkboxes.length === document.querySelectorAll('.userCheckbox:checked').length;
+        }
+    });
+
+    fetchMessages();
+    loadUsers();
+    loadMe();
+
+    function logout() {
+        // Remove the token from cookies by setting the cookie's expiry date to the past
+        document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/;";
+
+        // Optionally, redirect the user to the login page after logout
+        window.location.href = '/view/login'; // Adjust the URL as necessary for your app
+
+        // You could also display a message or handle other UI updates if needed
+    }
+</script>
+</body>
+</html>

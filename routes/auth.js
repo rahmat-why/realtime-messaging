@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const sql = require('mssql');
@@ -6,6 +7,51 @@ const connectToDb = require('../config/db');
 
 const router = express.Router();
 const saltRounds = 10;
+const nodemailer = require('nodemailer');
+
+// Create a rate limit rule for login requests (5 requests per 1 minutes)
+const loginLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 10 minutes
+    max: 5, // Limit each IP to 5 requests per window
+    message: 'Too many login attempts, please try again later.',
+    standardHeaders: true, // Return rate limit info in the response headers
+    legacyHeaders: false, // Disable the X-RateLimit-* headers
+    handler: (req, res) => {
+        res.status(429).json({
+            message: 'Too many login attempts, please try again later.'
+        });
+    }
+});
+
+// Create a rate limit rule for registration requests (5 requests per 1 minutes)
+const registerLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 10 minutes
+    max: 5, // Limit each IP to 5 requests per window
+    message: 'Too many registration attempts, please try again later.',
+    standardHeaders: true, // Return rate limit info in the response headers
+    legacyHeaders: false, // Disable the X-RateLimit-* headers
+    handler: (req, res) => {
+        res.status(429).json({
+            message: 'Too many registration attempts, please try again later.'
+        });
+    }
+});
+
+// Create a transporter object
+const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: {
+        user: process.env.MAILTRAP_USER,
+        pass: process.env.MAILTRAP_PASS,
+    },
+    tls: {
+        rejectUnauthorized: false // Accept self-signed certificates (for testing)
+    }
+});
+
+const { io } = require('../server');
 
 // JWT verification middleware
 function verifyToken(req, res, next) {
@@ -26,11 +72,22 @@ function verifyToken(req, res, next) {
 }
 
 // User registration endpoint
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
     const { username, password, email, role_id } = req.body;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     const pool = await connectToDb();
+
+    // Check if username or email already exists
+    const existingUser = await pool.request()
+        .input('username', sql.VarChar, username)
+        .input('email', sql.VarChar, email)
+        .query(`SELECT * FROM Users WHERE username = @username OR email = @email`);
+
+    if (existingUser.recordset.length > 0) {
+        return res.status(403).json({ message: 'Username or email is already registered.' });
+    }
+
     const result = await pool.request()
         .input('username', sql.VarChar, username)
         .input('hashed_password', sql.VarChar, hashedPassword)
@@ -40,9 +97,26 @@ router.post('/register', async (req, res) => {
             OUTPUT INSERTED.user_id 
             VALUES (@username, @hashed_password, @email, @role_id)`);
 
-    const verificationToken = jwt.sign({ userId: result.recordset[0].user_id }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ userId: result.recordset[0].user_id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     
-    res.status(201).json({ message: 'User registered successfully. Please verify your email', token: verificationToken });
+    // Configure the mail options
+    const mailOptions = {
+        from: 'internetofgreen@gmail.com',
+        to: email,
+        subject: 'Login Verify',
+        html: `Welcome ${username}, <br />Token to verify: <a href="http://localhost:5000/auth/verify/${token}">${token}</a>`
+    };
+
+    // Send the email
+    transporter.sendMail(mailOptions, (error, info) => {
+        if (error) {
+            console.error('Error sending email:', error);
+        } else {
+            console.log('Email sent:', info.response);
+        }
+    });
+    
+    res.status(201).json({ message: 'User registered successfully. Please verify your email', token: token });
 });
 
 // Verify email endpoint (assuming the link includes a verification token)
@@ -50,20 +124,24 @@ router.get('/verify/:token', async (req, res) => {
     try {
         const token = req.params.token;
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        console.log(decoded);
         
         const pool = await connectToDb();
+
         await pool.request()
             .input('user_id', sql.Int, decoded.userId)
             .query('UPDATE Users SET is_email_verified = 1 WHERE user_id = @user_id');
         
-        res.json({ message: 'Email verified successfully.' });
+        res.redirect(`/view/verify-success/${token}`);
     } catch (error) {
-        res.status(400).json({ error: 'Invalid or expired token.' });
+        const status = "Token invalid!"
+        const message = "Please check your email then verify the valid token!";
+        res.render('verify', { status, message }); // Pass them to the view
     }
 });
 
 // Login route
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
 
     try {
@@ -103,7 +181,24 @@ router.post('/login', async (req, res) => {
             process.env.JWT_SECRET,
             { expiresIn: '1h' } // Token expiration time
         );
+        
+        // Configure the mail options
+        const mailOptions = {
+            from: 'internetofgreen@gmail.com',
+            to: user.email,
+            subject: 'Login Verify',
+            html: `Welcome ${user.username}, <br />Token to verify: <a href="http://localhost:5000/auth/verify/${token}">${token}</a>`
+        };
 
+        // Send the email
+        transporter.sendMail(mailOptions, (error, info) => {
+            if (error) {
+                console.error('Error sending email:', error);
+            } else {
+                console.log('Email sent:', info.response);
+            }
+        });
+        
         res.status(200).json({ message: 'Login successful', token });
     } catch (error) {
         console.error('Login error:', error);
@@ -111,11 +206,49 @@ router.post('/login', async (req, res) => {
     }
 });
 
+// GET /me route to get logged-in user's details
+router.get('/me', verifyToken, async (req, res) => {
+    try {
+        const { userId } = req.user; // userId is decoded from the JWT
+
+        // Connect to the database
+        const pool = await connectToDb();
+
+        // Fetch the user details
+        const result = await pool.request()
+            .input('userId', sql.Int, userId)
+            .query(
+                `SELECT 
+                    u.username, 
+                    u.email, 
+                    u.role_id, 
+                    r.role_name, 
+                    u.is_email_verified 
+                FROM 
+                    Users u
+                JOIN 
+                    Role r ON u.role_id = r.role_id
+                WHERE 
+                    u.user_id = @userId`
+            );
+
+        if (result.recordset.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const user = result.recordset[0];
+
+        // Return user data
+        res.status(200).json(user);
+    } catch (error) {
+        console.error('Error fetching user data:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 // Delete User route (soft delete by setting is_email_verified to -1)
 router.delete('/delete/:userId',verifyToken, async (req, res) => {
     const userId = req.params.userId;
-
-    console.log(userId);
 
     try {
         // Connect to the database
@@ -131,7 +264,32 @@ router.delete('/delete/:userId',verifyToken, async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        res.status(200).json({ message: 'User has been marked as deleted' });
+        res.status(200).json({ message: 'User deleted successfully.' });
+    } catch (error) {
+        console.error('Error deleting user:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Activate User route
+router.put('/activate/:userId',verifyToken, async (req, res) => {
+    const userId = req.params.userId;
+
+    try {
+        // Connect to the database
+        const pool = await connectToDb();
+
+        // Update the user's is_email_verified status to 0
+        const result = await pool.request()
+            .input('userId', sql.Int, userId)
+            .query('UPDATE Users SET is_email_verified = 1 WHERE user_id = @userId');
+
+        // Check if any row was affected (user existed)
+        if (result.rowsAffected[0] === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        res.status(200).json({ message: 'User activated successfully.' });
     } catch (error) {
         console.error('Error deleting user:', error);
         res.status(500).json({ message: 'Server error' });
@@ -146,7 +304,35 @@ router.get('/users', verifyToken, async (req, res) => {
 
         // Query to select all users who are not marked as deleted
         const result = await pool.request()
-            .query('SELECT user_id, username, email, role_id, is_email_verified FROM Users WHERE is_email_verified != 0');
+        .query(`
+            SELECT u.user_id, u.username, u.email, u.role_id, r.role_name, u.is_email_verified 
+            FROM Users u
+            INNER JOIN Role r ON u.role_id = r.role_id
+        `);
+
+        res.status(200).json(result.recordset);
+    } catch (error) {
+        console.error('Error retrieving users:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Get All Users route
+router.get('/chat-users', verifyToken, async (req, res) => {
+    const sender_id = req.user.userId; // Extract sender_id from the JWT token
+    try {
+        // Connect to the database
+        const pool = await connectToDb();
+
+        // Query to select all users who are not marked as deleted
+        const result = await pool.request()
+        .input('sender', sql.Int, sender_id)
+        .query(`
+            SELECT u.user_id, u.username, u.email, u.role_id, r.role_name, u.is_email_verified 
+            FROM Users u
+            INNER JOIN Role r ON u.role_id = r.role_id
+            WHERE u.is_email_verified = 1 AND u.user_id != @sender
+        `);
 
         res.status(200).json(result.recordset);
     } catch (error) {
@@ -211,6 +397,16 @@ router.post('/create', verifyToken, async (req, res) => {
         // Connect to the database
         const pool = await connectToDb();
 
+        // Check if username or email already exists
+        const existingUser = await pool.request()
+            .input('username', sql.VarChar, username)
+            .input('email', sql.VarChar, email)
+            .query(`SELECT * FROM Users WHERE username = @username OR email = @email`);
+
+        if (existingUser.recordset.length > 0) {
+            return res.status(403).json({ message: 'Username or email is already registered.' });
+        }
+
         // Insert the new user, setting is_email_verified to 1
         const result = await pool.request()
             .input('username', sql.VarChar, username)
@@ -222,7 +418,7 @@ router.post('/create', verifyToken, async (req, res) => {
                 VALUES (@username, @hashed_password, @email, @role_id, 1)
             `);
 
-        res.status(201).json({ message: 'User created successfully and is_email_verified set to 1.' });
+        res.status(201).json({ message: 'User created and activated successfully.' });
     } catch (error) {
         console.error('Error creating user:', error);
         res.status(500).json({ message: 'Server error' });
@@ -234,28 +430,25 @@ router.post('/send-message', verifyToken, async (req, res) => {
     const { receiver_id, content } = req.body;
     const sender_id = req.user.userId; // Extract sender_id from the JWT token
 
-    if (!receiver_id || !content) {
-        return res.status(400).json({ message: 'Receiver ID and message content are required' });
+    if (!Array.isArray(receiver_id) || receiver_id.length === 0 || !content) {
+        return res.status(400).json({ message: 'Receiver IDs and message content are required' });
     }
 
     try {
         const pool = await connectToDb();
 
-        // Insert message into the database
-        // const result = await pool.request()
-        //     .input('sender_id', sql.Int, sender_id)
-        //     .input('receiver_id', sql.Int, receiver_id)
-        //     .input('content', sql.Text, content)
-        //     .query(`
-        //         INSERT INTO Messages (sender_id, receiver_id, content) 
-        //         VALUES (@sender_id, @receiver_id, @content)
-        //     `);
+        // Convert receiver_id array to a JSON string to store in the database
+        const receiverIdJson = JSON.stringify(receiver_id);
 
-        req.io.emit('sendMessage', {
-            sender_id: sender_id,
-            content: content,
-            timestamp: new Date()
-        });
+        // Insert message with encoded receiver_id array
+        await pool.request()
+            .input('sender_id', sql.Int, sender_id)
+            .input('receiver_id', sql.VarChar, receiverIdJson)
+            .input('content', sql.Text, content)
+            .query(`
+                INSERT INTO Messages (sender_id, receiver_id, content) 
+                VALUES (@sender_id, @receiver_id, @content)
+            `);
 
         res.status(201).json({ message: 'Message sent successfully.' });
     } catch (error) {
@@ -266,20 +459,43 @@ router.post('/send-message', verifyToken, async (req, res) => {
 
 // Receive messages route
 router.get('/receive-message', verifyToken, async (req, res) => {
-    const userId = req.user.userId;
+    const {userId,role} = req.user;
 
     try {
         const pool = await connectToDb();
 
-        // Query to fetch all messages where receiver_id matches or sender_id matches
-        const result = await pool.request()
-            .input('userId', sql.Int, userId)
-            .query(`
-                SELECT message_id, sender_id, receiver_id, content, timestamp 
-                FROM Messages 
-                WHERE receiver_id = @userId OR sender_id = @userId
-                ORDER BY timestamp DESC
-            `);
+        // normal user
+        if(role == 4) {
+            var result = await pool.request()
+                .input('userId', sql.Int, userId)
+                .query(`
+                    SELECT message_id, sender_id, Users.username as sender_name, receiver_id, content, timestamp
+                    FROM Messages 
+                    JOIN Users ON Users.user_id = Messages.sender_id
+                    WHERE message_id IN (
+                        SELECT message_id
+                        FROM Messages 
+                        OUTER APPLY OPENJSON(receiver_id) 
+                            WITH (userId INT '$.userId') AS jsonReceiver
+                        WHERE jsonReceiver.userId = @userId OR sender_id = @userId
+                    )
+                    ORDER BY timestamp DESC;
+                `);
+        }else{
+            var result = await pool.request()
+                .query(`
+                    SELECT message_id, sender_id, Users.username as sender_name, receiver_id, content, timestamp
+                    FROM Messages 
+                    JOIN Users ON Users.user_id = Messages.sender_id
+                    WHERE message_id IN (
+                        SELECT message_id
+                        FROM Messages 
+                        OUTER APPLY OPENJSON(receiver_id) 
+                            WITH (userId INT '$.userId') AS jsonReceiver
+                    )
+                    ORDER BY timestamp DESC;
+                `);
+        }
 
         // If no messages found, return empty array
         if (result.recordset.length === 0) {
@@ -288,7 +504,7 @@ router.get('/receive-message', verifyToken, async (req, res) => {
 
         // Map over the results and add the 'type' attribute
         const messagesWithType = result.recordset.map(message => {
-            const type = message.receiver_id === userId ? 'in' : 'out';
+            const type = message.sender_id === userId ? 'out' : 'in';
             return { ...message, type };
         });
 
@@ -297,6 +513,23 @@ router.get('/receive-message', verifyToken, async (req, res) => {
     } catch (error) {
         console.error('Error fetching messages:', error);
         res.status(500).json({ message: 'Server error while fetching messages.' });
+    }
+});
+
+// Get All Roles route
+router.get('/roles', async (req, res) => {
+    try {
+        // Connect to the database
+        const pool = await connectToDb();
+
+        // Query to select all roles
+        const result = await pool.request()
+            .query('SELECT role_id, role_name FROM Role');
+
+        res.status(200).json(result.recordset);
+    } catch (error) {
+        console.error('Error retrieving roles:', error);
+        res.status(500).json({ message: 'Server error' });
     }
 });
 

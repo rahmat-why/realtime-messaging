@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Account Verified</title>
+</head>
+<body>
+    <h1>Verification Successful!</h1>
+    <p>Thank you for verification.</p>
+    <p>This site will be redirected to the homepage in 5 seconds.</p> 
+
+    <script>
+        const pathname = window.location.pathname;
+        const token = pathname.split('/').pop(); // Get the last part of the URL, which is the token
+        
+        // Set the token to localStorage if it exists
+        if (token) {
+            document.cookie = `token=${token}; path=/; max-age=${60 * 60 * 24 * 7}`;  // Cookie will last for 7 days
+        }
+
+        setTimeout(() => {
+            window.location.href = '/view/user';
+        }, 5000);
+    </script>
+</body>
+</html>
